@@ -17,18 +17,51 @@ app.use(express.json());
 
 const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_jwt_key_12345';
 
+// -------------------------------------------------------------
+// DATABASE CONNECTION & AUTOMATIC ADMIN SEEDING
+// -------------------------------------------------------------
 mongoose.connect(process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/qr_events')
-  .then(() => console.log('MongoDB Connected'))
+  .then(async () => {
+    console.log('MongoDB Connected');
+    await seedDefaultAdmin();
+  })
   .catch(err => console.error('MongoDB Connection Error:', err));
 
+// Function to automatically create a default admin if none exists
+// Function to seed or reset the default admin account
+async function seedDefaultAdmin() {
+  try {
+    const salt = await bcrypt.genSalt(10);
+    const hashedPassword = await bcrypt.hash('Admin@123', salt);
+
+    // Delete existing admin with this email to clear stale credentials
+    await User.deleteOne({ email: 'admin@gatepass.com' });
+
+    const defaultAdmin = new User({
+      name: 'System Administrator',
+      email: 'admin@gatepass.com',
+      password: hashedPassword,
+      role: 'ADMIN'
+    });
+
+    await defaultAdmin.save();
+    console.log('----------------------------------------------------');
+    console.log('DEFAULT ADMIN READY FOR LOGIN:');
+    console.log('Email: admin@gatepass.com');
+    console.log('Password: Admin@123');
+    console.log('----------------------------------------------------');
+  } catch (err) {
+    console.error('Failed to seed default admin:', err.message);
+  }
+}
 // -------------------------------------------------------------
 // AUTHENTICATION ENDPOINTS
 // -------------------------------------------------------------
 
-// Register Account (USER or ADMIN)
+// Public Registration: STRICTLY creates 'USER' accounts
 app.post('/api/auth/register', async (req, res) => {
   try {
-    const { name, email, password, role } = req.body;
+    const { name, email, password } = req.body;
     if (!name || !email || !password) {
       return res.status(400).json({ error: 'Name, email, and password are required.' });
     }
@@ -41,16 +74,21 @@ app.post('/api/auth/register', async (req, res) => {
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);
 
+    // Forces role to USER regardless of payload
     const newUser = new User({
       name,
       email,
       password: hashedPassword,
-      role: role === 'ADMIN' ? 'ADMIN' : 'USER'
+      role: 'USER'
     });
 
     await newUser.save();
 
-    const token = jwt.sign({ id: newUser._id, role: newUser.role, name: newUser.name }, JWT_SECRET, { expiresIn: '1d' });
+    const token = jwt.sign(
+      { id: newUser._id, role: newUser.role, name: newUser.name, email: newUser.email }, 
+      JWT_SECRET, 
+      { expiresIn: '1d' }
+    );
 
     res.status(201).json({
       message: 'Account created successfully',
@@ -62,7 +100,7 @@ app.post('/api/auth/register', async (req, res) => {
   }
 });
 
-// Login
+// Login for both Users & Default Admin
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -76,7 +114,12 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(400).json({ error: 'Invalid email or password.' });
     }
 
-    const token = jwt.sign({ id: user._id, role: user.role, name: user.name }, JWT_SECRET, { expiresIn: '1d' });
+    // Include name and email in JWT payload so ticket generator gets valid data
+    const token = jwt.sign(
+      { id: user._id, role: user.role, name: user.name, email: user.email }, 
+      JWT_SECRET, 
+      { expiresIn: '1d' }
+    );
 
     res.json({
       message: 'Logged in successfully',
@@ -92,13 +135,20 @@ app.post('/api/auth/login', async (req, res) => {
 // TICKET ENDPOINTS
 // -------------------------------------------------------------
 
-// Issue Pass (Accessible by logged-in users or admins)
+// Issue Pass (Fix: Extract name/email from verified JWT user or body)
 app.post('/api/tickets/register', verifyToken, async (req, res) => {
   try {
+    const attendeeName = req.user.name || req.body.name;
+    const attendeeEmail = req.user.email || req.body.email;
+
+    if (!attendeeName || !attendeeEmail) {
+      return res.status(400).json({ error: 'Attendee name and email are missing.' });
+    }
+
     const ticketCode = `TKT-${uuidv4().substring(0, 8).toUpperCase()}`;
     const newTicket = new Ticket({
-      attendeeName: req.user.name,
-      attendeeEmail: req.body.email || req.user.email,
+      attendeeName,
+      attendeeEmail,
       ticketCode
     });
 
